@@ -1,0 +1,23 @@
+# MCP Server & RAG core
+fastmcp
+langchain
+langchain-community
+langchain-ollama
+langgraph
+
+# Vector store
+chromadb
+
+# Document loaders
+unstructured
+pypdf
+python-docx
+
+# Utilities
+python-dotenv
+pyyaml
+
+# Testing
+pytest
+pytest-asyncio
+pytest-mock

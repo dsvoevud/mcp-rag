@@ -1,0 +1,13 @@
+Sample Document — Retrieval-Augmented Generation
+
+This plain text file is used for smoke-testing the RAG indexer alongside the
+markdown example.
+
+RAG (Retrieval-Augmented Generation) combines a retrieval system with a
+generative language model. The retriever fetches relevant passages from a
+knowledge base, and the generator conditions its output on those passages.
+
+Key benefits:
+- Reduces hallucinations by grounding answers in retrieved evidence
+- Allows the model to access up-to-date or domain-specific knowledge
+- More controllable and auditable than pure generative approaches

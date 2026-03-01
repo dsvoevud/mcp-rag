@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # TODO: add model pull command
+
+  mcp-rag:
+    build: .
+    container_name: mcp-rag-server
+    depends_on:
+      - ollama
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+    # TODO: configure ports / stdio transport
+
+volumes:
+  ollama_data:
