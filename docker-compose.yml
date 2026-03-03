@@ -1,23 +1,57 @@
-version: "3.9"
+# ---------------------------------------------------------------------------
+# MCP RAG Server — Docker Compose stack
+#
+# Prerequisites:
+#   - LM Studio running on the host with the desired model loaded and the
+#     local server started (Settings → Local Server → Start Server).
+#     Default address: http://localhost:1234/v1
+#
+# Start:
+#   docker compose up --build
+#
+# The mcp-rag server exposes port 8000 (streamable-http transport).
+# Configure your MCP client to use http://localhost:8000.
+#
+# To use a different model, set LLM_MODEL to the name shown in LM Studio.
+# ---------------------------------------------------------------------------
 
 services:
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    # TODO: add model pull command
-
   mcp-rag:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mcp-rag:latest
     container_name: mcp-rag-server
-    depends_on:
-      - ollama
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist the ChromaDB index between restarts
+      - chroma_data:/app/chroma_db
+      # Mount local sample_docs so you can add documents without rebuilding
+      - ./sample_docs:/app/sample_docs:ro
+    # Allows the container to reach LM Studio on the host machine.
+    # On Docker Desktop (Windows / macOS) host.docker.internal resolves
+    # automatically; the extra_hosts entry makes it work on Linux too.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      - OLLAMA_BASE_URL=http://ollama:11434
-    # TODO: configure ports / stdio transport
+      # Transport: streamable-http exposes port 8000
+      TRANSPORT: streamable-http
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "8000"
+      # Point the LLM at LM Studio running on the host
+      LLM_BASE_URL: http://host.docker.internal:1234/v1
+      LLM_API_KEY: lm-studio
+      LLM_MODEL: ${LLM_MODEL:-deepseek/deepseek-r1-0528-qwen3-8b}
+      LLM_TEMPERATURE: "0.0"
+      LLM_STRIP_THINKING_TAGS: "true"
+      # Vector store
+      CHROMA_DB_PATH: /app/chroma_db
+      COLLECTION_NAME: rag_collection
+      # Retrieval
+      TOP_K: "5"
 
 volumes:
-  ollama_data:
+  chroma_data:
+    driver: local

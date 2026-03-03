@@ -3,6 +3,7 @@ fastmcp
 langchain
 langchain-community
 langchain-ollama
+langchain-openai
 langgraph
 
 # Vector store
