@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -81,6 +83,25 @@ def _make_splitter(extension: str) -> RecursiveCharacterTextSplitter:
     )
 
 
+# Pattern that matches numbered-section amendment files (e.g. "FACT 1 —").
+_SECTION_HEADER_RE = re.compile(r"(?=\n{1,2}FACT \d+)", re.IGNORECASE)
+
+
+def _pre_split_sections(content: str, source: str) -> list[Document]:
+    """Split structured amendment files on FACT N section boundaries.
+
+    Uses a zero-width lookahead so each chunk retains its own "FACT N —" header,
+    giving the embedding a focused, single-topic vector per fact.
+    Only called when the file contains at least one "FACT N" header.
+    """
+    parts = _SECTION_HEADER_RE.split(content)
+    return [
+        Document(page_content=part.strip(), metadata={"source": source})
+        for part in parts
+        if part.strip()
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Indexer
 # ---------------------------------------------------------------------------
@@ -102,6 +123,28 @@ class Indexer:
         self._indexed_files: list[str] = []
 
     # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _walk_all_files(root: Path, glob_pattern: str) -> list[Path]:
+        """Return all files under *root*, including hidden files and dirs.
+
+        When glob_pattern is the default ``**/*``, ``os.walk`` is used so that
+        hidden entries (names starting with ``.``) are never skipped — unlike
+        Python's ``pathlib.glob`` on 3.12 + which omits them unless
+        ``include_hidden=True`` is passed.  For any custom pattern the
+        standard ``Path.glob`` is used as a fallback.
+        """
+        if glob_pattern == "**/*":
+            result: list[Path] = []
+            for dirpath, _dirnames, filenames in os.walk(root):
+                for filename in filenames:
+                    result.append(Path(dirpath) / filename)
+            return result
+        return [p for p in root.glob(glob_pattern) if p.is_file()]
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
@@ -119,7 +162,8 @@ class Indexer:
         if not root.exists():
             raise FileNotFoundError(f"Folder not found: {root}")
 
-        files = [p for p in root.glob(glob_pattern) if p.is_file() and p.suffix in _ALL_SUPPORTED]
+        all_files = self._walk_all_files(root, glob_pattern)
+        files = [p for p in all_files if p.suffix in _ALL_SUPPORTED]
 
         chunks_added = 0
         skipped: list[str] = []
@@ -134,8 +178,8 @@ class Indexer:
                 logger.exception("Failed to index %s", file_path)
                 errors.append(f"{file_path}: {exc}")
 
-        for p in root.glob(glob_pattern):
-            if p.is_file() and p.suffix not in _ALL_SUPPORTED:
+        for p in all_files:
+            if p.suffix not in _ALL_SUPPORTED:
                 skipped.append(str(p))
 
         self._last_indexed_at = datetime.now(timezone.utc)
@@ -207,8 +251,18 @@ class Indexer:
             return 0
 
         splitter = _make_splitter(file_path.suffix)
-        doc = Document(page_content=content, metadata={"source": str(file_path)})
-        chunks: list[Document] = splitter.split_documents([doc])
+
+        # Pre-split structured files (e.g. Later_edits.txt with FACT N sections)
+        # so that each numbered section becomes its own document before the
+        # size-based splitter runs.  Without this step, facts of ~300 chars each
+        # get merged into 1200-char multi-topic chunks and lose retrieval focus.
+        if _SECTION_HEADER_RE.search(content):
+            pre_docs = _pre_split_sections(content, str(file_path))
+            logger.debug("Pre-split %s into %d section docs", file_path.name, len(pre_docs))
+        else:
+            pre_docs = [Document(page_content=content, metadata={"source": str(file_path)})]
+
+        chunks: list[Document] = splitter.split_documents(pre_docs)
 
         if not chunks:
             return 0

@@ -47,6 +47,7 @@ coverage.xml
 
 # === IDEs & Editors ===
 .vscode/
+!.vscode/mcp.json
 .idea/
 *.sublime-project
 *.sublime-workspace

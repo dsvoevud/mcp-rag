@@ -11,7 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --prefix=/install -r requirements.txt
 
 
 # ---------------------------------------------------------------------------
@@ -26,7 +27,15 @@ COPY --from=builder /install /usr/local
 
 # Copy application source
 COPY src/ ./src/
+COPY tests/ ./tests/
 COPY sample_docs/ ./sample_docs/
+
+# Pre-download ChromaDB's default ONNX embedding model so tests and the
+# first index_folder call never need outbound network access at runtime.
+RUN python -c "\
+from chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import ONNXMiniLM_L6_V2; \
+ef = ONNXMiniLM_L6_V2(); \
+ef(['warmup'])"
 
 # ---------------------------------------------------------------------------
 # Runtime configuration
@@ -60,8 +69,9 @@ VOLUME ["/app/chroma_db", "/app/sample_docs"]
 EXPOSE 8000
 
 # Healthcheck — only meaningful in HTTP mode
+# The /mcp endpoint requires Accept: text/event-stream; a 406 response
+# (wrong Accept) still confirms the server process is alive and listening.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" \
-    || exit 1
+    CMD python -c "import urllib.request, sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp', headers={'Accept':'text/event-stream'})); sys.exit(0)" 2>/dev/null || exit 1
 
 CMD ["python", "-m", "src.server"]

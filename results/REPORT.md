@@ -1,5 +1,24 @@
 # Report — MCP RAG Server: Development History
 
+## Summary
+
+A fully local Corrective RAG MCP server was designed, implemented, tested, containerised,
+and validated end-to-end. The system indexes arbitrary document folders into a ChromaDB
+vector store and exposes five MCP tools (`index_folder`, `ask_question`,
+`find_relevant_docs`, `summarize_document`, `index_status`) to any MCP-compatible
+client. A nine-node LangGraph pipeline handles retrieval, relevance grading, answer
+generation, and hallucination checking — all running locally without external API keys.
+
+The project went through nine implementation phases plus a live deployment phase that
+uncovered and resolved several practical issues: a missing `chardet` dependency that
+crashed the Docker container, a non-existent healthcheck endpoint, a context-window
+overflow with the initial DeepSeek R1 model, slow rebuilds due to disabled pip caching,
+and a `pathlib.glob` limitation that silently excluded hidden files. The final deployment
+uses Qwen2.5-7B-Instruct-1M (1 M token context), BuildKit pip caching, and `os.walk`-based
+directory traversal. All 33 unit tests pass throughout.
+
+---
+
 ## What Was Built
 
 A fully local **Corrective RAG MCP server** that turns a folder of documents into
@@ -164,6 +183,7 @@ beyond what the Hobbit corpus already provides.
 | `cfg` read at call-time breaks test isolation | `get_status()` reads `cfg` live | `yield`-based fixture holds `patch.object` open for full test scope |
 | LangChain type error when mocking `summarize_document` | `ChatPromptTemplate.__or__` rejects `MagicMock` | Patch `SUMMARIZATION_PROMPT` itself with a mock whose `__or__` returns a full fake chain |
 | `host.docker.internal` not resolving on Linux | Docker Desktop auto-maps it, bare Docker does not | `extra_hosts: ["host.docker.internal:host-gateway"]` in compose |
+| "What did Thorin say to Bilbo before he died?" returned "insufficient information" | Thorin's deathbed speech was split across two 600-char chunks; each half had poor cosine similarity to the question alone | Increased `CHUNK_SIZE` from 600 → 1200 and re-indexed; the complete scene now lives in one chunk with rich deathbed context, ranking in the top 10 |
 
 ---
 
@@ -194,6 +214,192 @@ beyond what the Hobbit corpus already provides.
 
 ---
 
+## Post-Implementation: Docker Deployment & Refinements
+
+### Docker Container Crash — Missing `chardet`
+
+After the initial `docker compose up --build`, the container started and immediately
+exited with:
+
+```
+ModuleNotFoundError: No module named 'chardet'
+```
+
+`chardet` was being used directly in `indexer.py` for encoding detection but had
+never been added to `requirements.txt` — it had been installed implicitly as a
+transitive dependency in the development venv, so the omission was invisible until
+the clean Docker build environment exposed it. The fix was trivial: add `chardet`
+to `requirements.txt`.
+
+**Lesson:** Always verify `requirements.txt` against a clean environment (e.g.
+a freshly created venv or a Docker build) rather than relying on the development
+venv, where transitive deps may mask missing direct dependencies.
+
+### Healthcheck Probe Returning 404
+
+The Dockerfile's `HEALTHCHECK` originally probed `/health`:
+
+```dockerfile
+CMD curl -f http://localhost:8000/health || exit 1
+```
+
+FastMCP's streamable-http transport does not expose a `/health` route — the only
+endpoint is `/mcp`. A bare `GET /mcp` returns `400 Bad Request` because the MCP
+protocol requires an `Accept: text/event-stream` header. The healthcheck was
+updated to:
+
+```dockerfile
+CMD python -c "import urllib.request, sys; \
+    r=urllib.request.urlopen(urllib.request.Request( \
+    'http://localhost:8000/mcp', headers={'Accept':'text/event-stream'})); \
+    sys.exit(0)"
+```
+
+This correctly handshakes with the MCP endpoint and does not introduce a `curl`
+dependency into the slim runtime image.
+
+### Context Window Exceeded with DeepSeek R1
+
+After switching the MCP client to the Docker HTTP transport and re-indexing with
+`CHUNK_SIZE=1200` and `TOP_K=10`, a query about Smaug failed with:
+
+```
+Error code: 400 — context_length_exceeded
+```
+
+DeepSeek R1 (the initial model) has an **8 k token context window**. With
+`CHUNK_SIZE=1200 × TOP_K=10` the retrieved context alone could overflow the window
+before the prompt template and the answer had even been added. The fix was to add
+environment-variable overrides in `docker-compose.yml` specifically for the
+DeepSeek target:
+
+```yaml
+CHUNK_SIZE: "600"
+CHUNK_OVERLAP: "80"
+TOP_K: "5"
+```
+
+These overrides live only in the compose file; the application code and
+`config.py` defaults remain at 1200/150/10 for local stdio usage where there is
+no context constraint.
+
+### Slow Docker Rebuilds
+
+Every `docker compose up --build` took 3–5 minutes because the `pip install`
+step downloads and re-compiles all packages from scratch each time, including
+`hnswlib` (a C++ extension that must be compiled). The root cause was
+`--no-cache-dir` in the original `RUN pip install` instruction, which disables
+pip's wheel cache.
+
+The fix uses BuildKit's cache-mount feature:
+
+```dockerfile
+# Before
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# After
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --prefix=/install -r requirements.txt
+```
+
+BuildKit mounts a persistent host-side pip cache directory into the build
+container. Downloaded wheels and compiled binaries are reused across builds.
+Subsequent rebuilds that only change application source code (not
+`requirements.txt`) now complete in seconds rather than minutes.
+
+### `chardet` Version Warning
+
+After adding `chardet` to `requirements.txt`, running pytest emitted:
+
+```
+RequestsDependencyWarning: urllib3 (2.6.3) or chardet (6.0.0.post1) /
+charset_normalizer (3.4.4) doesn't match a supported version!
+```
+
+`requests` 2.32.5 declares `chardet<6` as a supported range. The venv had
+`chardet` 6.0.0.post1 installed. The fix was to pin the version in
+`requirements.txt`:
+
+```
+chardet>=3,<6
+```
+
+This keeps `chardet` 5.x available (fully functional for encoding detection)
+while satisfying the `requests` constraint. The warning disappeared; all 33 tests
+continued to pass.
+
+### Model Switch — DeepSeek R1 → Qwen2.5-7B-Instruct-1M
+
+DeepSeek R1 has two characteristics that create operational friction in this
+pipeline:
+
+1. **8 k context window** — forces chunk-size/top-k trade-offs in Docker
+2. **`<think>…</think>` reasoning blocks** — require stripping before JSON
+   parsing in every grading and generation node; output is non-deterministic at
+   `temperature=0` because the reasoning phase varies run-to-run
+
+`lmstudio-community/qwen2.5-7b-instruct-1m` was chosen as the replacement:
+
+- **1 M token context window** — `CHUNK_SIZE=1200`, `TOP_K=10` fit comfortably
+  with no compose overrides needed; the DeepSeek-specific overrides were removed
+- **No thinking tags** — `LLM_STRIP_THINKING_TAGS` set to `false`; cleaner,
+  faster, more consistent JSON output from grading nodes
+- **Faster inference** — the 7 B parameter count matches DeepSeek R1 8 B but
+  without the reasoning overhead
+
+After switching, live tests confirmed correct retrieval and generation:
+
+| Query | Expected (from `Later_edits.txt`) | Result |
+|---|---|---|
+| "What colour is Smaug?" | black with bright pink polka dots | ✅ correct |
+| "Tell me about the Eagles' Leader" | Kevin, commercial pilot's license, Toyota Camry | ✅ correct |
+
+### Hidden Files — Indexer `os.walk` Refactor
+
+`pathlib.Path.glob("**/*")` silently skips hidden files and directories (names
+starting with `.`) on Python 3.12 and later. To ensure that hidden knowledge-base
+files (e.g. `.notes/`, `.context/`) are indexed when present, the two `glob`
+calls in `index_folder` were replaced with `os.walk`:
+
+```python
+@staticmethod
+def _walk_all_files(root: Path, glob_pattern: str) -> list[Path]:
+    if glob_pattern == "**/*":          # default — use os.walk for hidden support
+        result: list[Path] = []
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for filename in filenames:
+                result.append(Path(dirpath) / filename)
+        return result
+    return [p for p in root.glob(glob_pattern) if p.is_file()]
+```
+
+Custom `glob_pattern` values still fall back to `Path.glob` so existing
+integrations are unaffected.
+
+### Hobbit Corpus Split by Chapter
+
+The original corpus stored the entire Hobbit text in a single 800 KB file
+(`Tolkien_The_Hobbit.txt`). Every retrieved chunk therefore cited the same source
+file regardless of which chapter it came from, making source attribution in
+answers unhelpful.
+
+A one-off Python script split the file into 19 chapter files under
+`sample_docs/Hobbit/` using Roman-numeral chapter headings as delimiters:
+
+```
+Chapter_01_AN_UNEXPECTED_PARTY.txt
+Chapter_02_ROAST_MUTTON.txt
+...
+Chapter_19_THE_LAST_STAGE.txt
+```
+
+No changes to the indexer or configuration were needed — `os.walk` already
+recurses into subdirectories, and `.txt` files are already in `_ALL_SUPPORTED`.
+Retrieved chunks now cite the specific chapter file, giving answers meaningful
+provenance (e.g. `source: Chapter_05_RIDDLES_IN_THE_DARK.txt`).
+
+---
+
 ## Limitations and Future Improvements
 
 - **LM Studio dependency** — the server requires LM Studio to be running on the
@@ -207,6 +413,13 @@ beyond what the Hobbit corpus already provides.
   but not the strongest retriever. The `EMBEDDING_PROVIDER=ollama` config path
   exists but is not wired up; connecting it to `nomic-embed-text` would improve
   retrieval quality on longer documents.
+- **Chunk-boundary sensitivity** — with `CHUNK_SIZE=600` the deathbed exchange
+  between Thorin and Bilbo split across two chunks; each half had poor cosine
+  similarity to the question *"What did Thorin say to Bilbo before he died?"* and
+  the death scene fell outside the top-10 results. Raising `CHUNK_SIZE` to 1200
+  kept the full scene in one chunk and fixed retrieval. The general lesson: chunk
+  boundaries should not cut through semantically coherent scenes; tuning
+  `CHUNK_SIZE` is the first lever to pull when important passages are not retrieved.
 - **No streaming** — `ask_question` returns the full answer in one shot. Adding
   streaming via FastMCP's `ctx.stream()` would improve perceived responsiveness
   for long answers.

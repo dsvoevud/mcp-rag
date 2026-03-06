@@ -43,14 +43,15 @@ services:
       # Point the LLM at LM Studio running on the host
       LLM_BASE_URL: http://host.docker.internal:1234/v1
       LLM_API_KEY: lm-studio
-      LLM_MODEL: ${LLM_MODEL:-deepseek/deepseek-r1-0528-qwen3-8b}
+      LLM_MODEL: ${LLM_MODEL:-lmstudio-community/qwen2.5-7b-instruct-1m}
       LLM_TEMPERATURE: "0.0"
-      LLM_STRIP_THINKING_TAGS: "true"
+      LLM_STRIP_THINKING_TAGS: "false"
       # Vector store
       CHROMA_DB_PATH: /app/chroma_db
       COLLECTION_NAME: rag_collection
-      # Retrieval
-      TOP_K: "5"
+      # Retrieval — Qwen2.5-1M context window is large enough for default
+      # CHUNK_SIZE=1200 and TOP_K=10 with no risk of context overflow.
+      TOP_K: "10"
 
 volumes:
   chroma_data:

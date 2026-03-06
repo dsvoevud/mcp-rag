@@ -14,6 +14,124 @@ An **MCP (Model Context Protocol) server** that exposes a **Corrective RAG** pip
 
 ---
 
+## Docker Deployment
+
+### Prerequisites
+
+- LM Studio running on the host with your model loaded and the local server started
+  (**Local Server tab → Start Server**, default port `1234`)
+- Docker Desktop installed and running
+
+### Start
+
+```bash
+docker compose up --build
+```
+
+The MCP server starts on `http://localhost:8000/mcp` (streamable-http transport).
+The ChromaDB index is persisted in the `chroma_data` Docker volume between restarts.
+
+### Override the model
+
+To use a different model without editing files, set `LLM_MODEL` before starting:
+
+```bash
+# Windows PowerShell
+$env:LLM_MODEL="your-model-identifier"; docker compose up -d
+
+# bash / macOS / Linux
+LLM_MODEL=your-model-identifier docker compose up -d
+```
+
+### Index documents and query
+
+Once the container is running, use the MCP tools from your client (e.g. VS Code with `.vscode/mcp.json` pointing to `http://localhost:8000/mcp`):
+
+1. `index_folder` → `/app/sample_docs` (or any mounted path)
+2. `ask_question` → ask anything about the indexed content
+
+### Stop
+
+```bash
+docker compose down
+```
+
+To also wipe the index and start fresh:
+
+```bash
+docker compose down; docker volume rm mcp-rag_chroma_data
+```
+
+### Run tests inside the container
+
+```bash
+docker compose exec mcp-rag pytest tests/ -v
+```
+---
+
+
+---
+
+## Sample Queries
+
+The following queries were used to validate the RAG pipeline against the included
+`sample_docs/` corpus (The Hobbit + `Later_edits.txt` fictional amendments).
+
+### Project-specific overrides (`Later_edits.txt` beats the base corpus)
+
+These queries demonstrate the core RAG use-case: project-specific documentation
+overriding common knowledge.
+
+**Query:** `What colour is Smaug?`
+```
+Smaug is black with bright pink polka dots.
+(source: /app/sample_docs/Later_edits.txt)
+```
+
+**Query:** `Tell me about the Eagles' Leader`
+```
+The Lord of the Eagles, named Kevin, leads the group. He possesses a commercial
+pilot's license issued by the Misty Mountains Aviation Authority. As part of his
+community service agreement, he is obligated to rescue at least one wizard per
+fiscal year. On days off he drives a Toyota Camry and enjoys playing sudoku.
+(source: /app/sample_docs/Later_edits.txt)
+```
+
+### Factual retrieval from the Hobbit text
+
+**Query:** `What did Thorin say to Bilbo before he died?`
+```
+"Farewell, good thief. I go now to the halls of waiting to sit beside my
+fathers, until the world is renewed..."
+"No! There is more in you of good than you know, child of the kindly West.
+Some courage and some wisdom, blended in measure. If more of us valued food
+and cheer and song above hoarded gold, it would be a merrier world.
+But sad or merry, I must leave it now. Farewell!"
+(source: Chapter_18_THE_RETURN_JOURNEY.txt)
+```
+
+**Query:** `Where is the travel to goblins' caves described?`
+```
+Chapter 4 — "Over Hill and Under Hill" covers the company's journey through
+the Misty Mountains, their capture during a storm, and their descent into
+the goblin tunnels.
+(source: Chapter_04_OVER_HILL_AND_UNDER_HILL.txt)
+```
+
+### Debugging retrieval with `find_relevant_docs`
+
+When `ask_question` returns "insufficient information", use `find_relevant_docs`
+with more descriptive terms to inspect what the vector store actually retrieves:
+
+```
+# Instead of the user's question phrasing:
+find_relevant_docs("travel to goblins caves")  # poor recall
+
+# Try content-rich terms:
+find_relevant_docs("goblins caves mountains captured dwarves hobbit")  # hits Ch.4
+```
+---
+
 ## Requirements
 
 ### System Requirements
@@ -89,14 +207,12 @@ pip install -r requirements.txt
 ### 5. Configure LM Studio
 
 1. Download and install [LM Studio](https://lmstudio.ai/)
-2. Load a model — this project uses **`deepseek/deepseek-r1-0528-qwen3-8b`** (8B reasoning model)
+2. Load a model — this project uses **`lmstudio-community/qwen2.5-7b-instruct-1m`** (7B, 1M token context window)
 3. Start the local server on port `1234` (default): **Local Server tab → Start Server**
 4. Verify `LLM_MODEL` in `src/config.py` matches the model identifier shown in LM Studio
 
 > The server exposes an OpenAI-compatible API at `http://localhost:1234/v1`.
 > No API key is required — `lm-studio` is used as a placeholder value.
-
-> ⚠️ **DeepSeek R1 reasoning models** emit chain-of-thought inside `<think>...</think>` tags before the final answer. The pipeline automatically strips these tags (`LLM_STRIP_THINKING_TAGS = True` in `config.py`) so only the final answer is used in grading, hallucination checks, and responses.
 
 ### 6. (Optional) Configure Ollama Embeddings
 
@@ -115,13 +231,13 @@ All parameters are centralised in [`src/config.py`](src/config.py):
 | Parameter | Default | Description |
 |---|---|---|
 | `LLM_BASE_URL` | `http://localhost:1234/v1` | LM Studio API endpoint |
-| `LLM_MODEL` | `deepseek/deepseek-r1-0528-qwen3-8b` | Model name as shown in LM Studio |
+| `LLM_MODEL` | `lmstudio-community/qwen2.5-7b-instruct-1m` | Model name as shown in LM Studio |
 | `LLM_TEMPERATURE` | `0.0` | Deterministic output for RAG |
-| `LLM_STRIP_THINKING_TAGS` | `True` | Strip `<think>` tags from R1 reasoning model output |
-| `CHUNK_SIZE` | `600` | Tokens per chunk (tuned for Cyrillic + English prose) |
-| `CHUNK_OVERLAP` | `80` | Overlap between adjacent chunks (~13%) |
+| `LLM_STRIP_THINKING_TAGS` | `False` | Set `True` only for DeepSeek R1-style reasoning models that emit `<think>` tags |
+| `CHUNK_SIZE` | `1200` | Characters per chunk |
+| `CHUNK_OVERLAP` | `150` | Overlap between adjacent chunks (~12%) |
 | `CHROMA_DB_PATH` | `./chroma_db` | ChromaDB persistence directory |
-| `TOP_K` | `5` | Chunks returned per retrieval query |
+| `TOP_K` | `10` | Chunks returned per retrieval query |
 | `MAX_RETRIEVE_RETRIES` | `2` | Max query-broadening loops in the RAG graph |
 | `MAX_GENERATE_RETRIES` | `1` | Max regeneration attempts on hallucination detection |
 | `EMBEDDING_PROVIDER` | `default` | `default` (ChromaDB built-in) or `ollama` (bonus) |
@@ -130,25 +246,39 @@ All parameters are centralised in [`src/config.py`](src/config.py):
 
 ## Usage
 
-### Start the MCP Server
+### Start the MCP Server (stdio, local)
 
 ```bash
-python src/server.py
+python -m src.server
 ```
 
 ### Connect to VS Code Copilot Agent Mode
 
-Add the following to your VS Code `settings.json` or `.vscode/mcp.json`:
+**Option A — stdio (local venv, no Docker):**
+
+Add to `.vscode/mcp.json`:
 
 ```json
 {
-  "mcp": {
-    "servers": {
-      "rag-server": {
-        "type": "stdio",
-        "command": "python",
-        "args": ["src/server.py"]
-      }
+  "servers": {
+    "mcp-rag": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": ["-m", "src.server"],
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}
+```
+
+**Option B — HTTP (Docker container running):**
+
+```json
+{
+  "servers": {
+    "mcp-rag": {
+      "type": "http",
+      "url": "http://localhost:8000/mcp"
     }
   }
 }
@@ -166,20 +296,18 @@ Add the following to your VS Code `settings.json` or `.vscode/mcp.json`:
 
 ---
 
-## Docker Deployment
-
-```bash
-docker-compose up --build
-```
-
-This starts the MCP server and Ollama together. The model is pulled automatically on first run.
-
----
-
 ## Running Tests
+
+**Locally (recommended):**
 
 ```bash
 pytest tests/ -v
+```
+
+**Inside the Docker container:**
+
+```bash
+docker compose exec mcp-rag pytest tests/ -v
 ```
 
 ---
@@ -201,13 +329,16 @@ mcp-rag/
 │   ├── test_graph.py
 │   └── test_mcp_tools.py
 ├── sample_docs/
+│   └── Hobbit/          # Hobbit chapters split by chapter for better source attribution
+├── results/
+│   ├── ARCHITECTURE.md  # Detailed graph & design documentation
+│   └── REPORT.md        # Development history & lessons learned
+├── .vscode/
+│   └── mcp.json         # VS Code MCP client configuration
 ├── .venv/               # Python 3.11 virtual environment (not committed)
 ├── docker-compose.yml
 ├── Dockerfile
-├── requirements.txt
-├── .gitignore
-├── ARCHITECTURE.md
-└── REPORT.md
+└── requirements.txt
 ```
 
 ---

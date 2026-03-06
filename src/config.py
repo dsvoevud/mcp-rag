@@ -29,13 +29,13 @@ def _bool(name: str, default: bool) -> bool:
 # ---------------------------------------------------------------------------
 LLM_BASE_URL: str = os.environ.get("LLM_BASE_URL", "http://localhost:1234/v1")
 LLM_API_KEY: str = os.environ.get("LLM_API_KEY", "lm-studio")
-LLM_MODEL: str = os.environ.get("LLM_MODEL", "deepseek/deepseek-r1-0528-qwen3-8b")
+LLM_MODEL: str = os.environ.get("LLM_MODEL", "lmstudio-community/qwen2.5-7b-instruct-1m")
 LLM_TEMPERATURE: float = float(os.environ.get("LLM_TEMPERATURE", "0.0"))
 
 # DeepSeek R1 models emit chain-of-thought inside <think>...</think> tags
-# before the final answer. Set to True to strip these tags from all LLM
-# responses before they are used in downstream pipeline steps.
-LLM_STRIP_THINKING_TAGS: bool = _bool("LLM_STRIP_THINKING_TAGS", True)
+# before the final answer. Qwen2.5 does not emit thinking tags, so this
+# defaults to False. Set to True only for DeepSeek R1 / QwQ models.
+LLM_STRIP_THINKING_TAGS: bool = _bool("LLM_STRIP_THINKING_TAGS", False)
 
 # ---------------------------------------------------------------------------
 # Embeddings — ChromaDB in-process default model (no extra server needed)
@@ -51,8 +51,8 @@ OLLAMA_EMBEDDING_MODEL: str = os.environ.get("OLLAMA_EMBEDDING_MODEL", "nomic-em
 # Cyrillic tokenizes at ~1.5–2× tokens per word vs Latin, so keep
 # chunk_size on the higher side to preserve paragraph-level context.
 # ---------------------------------------------------------------------------
-CHUNK_SIZE: int = int(os.environ.get("CHUNK_SIZE", "600"))
-CHUNK_OVERLAP: int = int(os.environ.get("CHUNK_OVERLAP", "80"))
+CHUNK_SIZE: int = int(os.environ.get("CHUNK_SIZE", "1200"))
+CHUNK_OVERLAP: int = int(os.environ.get("CHUNK_OVERLAP", "150"))
 
 # ---------------------------------------------------------------------------
 # Vector store — ChromaDB in-process (no separate server)
@@ -63,7 +63,7 @@ COLLECTION_NAME: str = os.environ.get("COLLECTION_NAME", "rag_collection")
 # ---------------------------------------------------------------------------
 # Retrieval
 # ---------------------------------------------------------------------------
-TOP_K: int = int(os.environ.get("TOP_K", "5"))
+TOP_K: int = int(os.environ.get("TOP_K", "10"))
 
 # ---------------------------------------------------------------------------
 # Corrective RAG graph
