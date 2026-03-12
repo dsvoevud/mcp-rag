@@ -52,6 +52,9 @@ services:
       # Retrieval — Qwen2.5-1M context window is large enough for default
       # CHUNK_SIZE=1200 and TOP_K=10 with no risk of context overflow.
       TOP_K: "10"
+      # Auto-index sample_docs on startup if the collection is empty.
+      # Removes the need for users to manually call index_folder after deployment.
+      AUTO_INDEX_PATH: /app/sample_docs
 
 volumes:
   chroma_data:

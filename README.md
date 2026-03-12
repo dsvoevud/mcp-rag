@@ -242,6 +242,52 @@ All parameters are centralised in [`src/config.py`](src/config.py):
 | `MAX_GENERATE_RETRIES` | `1` | Max regeneration attempts on hallucination detection |
 | `EMBEDDING_PROVIDER` | `default` | `default` (ChromaDB built-in) or `ollama` (bonus) |
 
+### Switching to a different LLM backend
+
+The server uses the OpenAI-compatible `ChatOpenAI` client, so any backend that
+speaks the OpenAI API format works out of the box — just set two environment
+variables:
+
+| Backend | `LLM_BASE_URL` | `LLM_MODEL` | `LLM_API_KEY` |
+|---|---|---|---|
+| **LM Studio** (default) | `http://localhost:1234/v1` | model name from LM Studio UI | `lm-studio` (ignored) |
+| **Ollama** (local) | `http://localhost:11434/v1` | e.g. `llama3.2` | `ollama` (ignored) |
+| **OpenAI** | `https://api.openai.com/v1` | e.g. `gpt-4o-mini` | your OpenAI API key |
+| **Groq** | `https://api.groq.com/openai/v1` | e.g. `llama-3.1-70b-versatile` | your Groq API key |
+| **Azure OpenAI** | your Azure endpoint | deployment name | your Azure API key |
+
+**Local (stdio) — via `.env` file or environment:**
+
+```bash
+LLM_BASE_URL=http://localhost:11434/v1
+LLM_MODEL=llama3.2
+LLM_API_KEY=ollama
+python -m src.server
+```
+
+**Docker — via `docker-compose.yml` or environment variable override:**
+
+```yaml
+# docker-compose.yml environment section
+LLM_BASE_URL: https://api.openai.com/v1
+LLM_MODEL: gpt-4o-mini
+LLM_API_KEY: sk-...
+```
+
+Or at the command line without editing files:
+
+```powershell
+# Windows PowerShell
+$env:LLM_BASE_URL="https://api.openai.com/v1"
+$env:LLM_MODEL="gpt-4o-mini"
+$env:LLM_API_KEY="sk-..."
+docker compose up -d
+```
+
+> **Note on `LLM_STRIP_THINKING_TAGS`:** Set this to `True` only for models that
+> emit `<think>…</think>` reasoning blocks (DeepSeek R1, QwQ). For all other
+> models (GPT, Llama, Qwen2.5, Mistral) leave it at the default `False`.
+
 ---
 
 ## Usage

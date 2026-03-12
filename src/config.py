@@ -66,6 +66,14 @@ COLLECTION_NAME: str = os.environ.get("COLLECTION_NAME", "rag_collection")
 TOP_K: int = int(os.environ.get("TOP_K", "10"))
 
 # ---------------------------------------------------------------------------
+# Auto-indexing
+# If set, the server will automatically index this path on startup when the
+# collection is empty. Useful for Docker deployments where the sample_docs
+# folder is always mounted at a known location.
+# ---------------------------------------------------------------------------
+AUTO_INDEX_PATH: str = os.environ.get("AUTO_INDEX_PATH", "")
+
+# ---------------------------------------------------------------------------
 # Corrective RAG graph
 # ---------------------------------------------------------------------------
 MAX_RETRIEVE_RETRIES: int = int(os.environ.get("MAX_RETRIEVE_RETRIES", "2"))

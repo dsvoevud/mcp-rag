@@ -33,6 +33,27 @@ from src.indexer import Indexer
 from src.graph import run_graph
 from src.prompts import SUMMARIZATION_PROMPT, strip_thinking_tags
 
+
+def _is_connection_error(exc: BaseException) -> bool:
+    """Return True if *exc* (or any cause) is a network connectivity failure."""
+    import httpx, httpcore
+    for e in (exc, getattr(exc, "__cause__", None), getattr(exc, "__context__", None)):
+        if isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout,
+                          httpcore.ConnectError, httpcore.ConnectTimeout,
+                          ConnectionRefusedError)):
+            return True
+    return False
+
+
+def _llm_connection_error_message() -> str:
+    return (
+        f"Cannot connect to LM Studio at {cfg.LLM_BASE_URL}. "
+        "Please make sure LM Studio is running on the host machine, "
+        "a model is loaded, and the Local Server is started "
+        "(LM Studio → Local Server tab → Start Server). "
+        f"Expected model: '{cfg.LLM_MODEL}'."
+    )
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -74,9 +95,17 @@ def _get_llm() -> ChatOpenAI:
 mcp = FastMCP(
     name="mcp-rag-server",
     instructions=(
-        "A RAG knowledge base server. Use index_folder to index documents, "
-        "then ask_question to query them. Use find_relevant_docs for raw retrieval, "
-        "summarize_document to summarise a file, and index_status to check index state."
+        "A RAG knowledge base server. "
+        "ALWAYS call index_status first to check whether documents are already indexed. "
+        "If total_chunks is 0, call index_folder with the path to the documents directory "
+        "before answering any questions. "
+        "If ask_question returns a connection error, call llm_status to diagnose whether "
+        "LM Studio is running and the model is loaded. "
+        "Use ask_question to query indexed documents through the full Corrective RAG pipeline. "
+        "Use find_relevant_docs for raw chunk retrieval without generation. "
+        "Use summarize_document to summarise a single file. "
+        "Use index_status to check how many chunks are indexed and when indexing last ran. "
+        "Use llm_status to check whether the LLM backend is reachable."
     ),
 )
 
@@ -139,8 +168,13 @@ def ask_question(question: str) -> dict:
     """
     logger.info("ask_question called: %s", question[:120])
     if _get_indexer().get_status()["total_chunks"] == 0:
+        path_hint = (
+            f" Call index_folder with path '{cfg.AUTO_INDEX_PATH}'."
+            if cfg.AUTO_INDEX_PATH
+            else " Call index_folder with the path to your documents directory."
+        )
         return {
-            "answer": "The index is empty. Please run index_folder first.",
+            "answer": f"The index is empty.{path_hint}",
             "sources": [],
             "is_grounded": False,
             "retrieve_retries": 0,
@@ -157,8 +191,12 @@ def ask_question(question: str) -> dict:
         }
     except Exception as exc:
         logger.exception("Error in ask_question")
+        if _is_connection_error(exc):
+            answer = _llm_connection_error_message()
+        else:
+            answer = f"Error running RAG pipeline: {exc}"
         return {
-            "answer": f"Error running RAG pipeline: {exc}",
+            "answer": answer,
             "sources": [],
             "is_grounded": False,
             "retrieve_retries": 0,
@@ -239,6 +277,8 @@ def summarize_document(file_path: str) -> dict:
         return {"summary": raw.strip(), "filename": path.name}
     except Exception as exc:
         logger.exception("Error in summarize_document")
+        if _is_connection_error(exc):
+            return {"summary": "", "filename": str(path), "error": _llm_connection_error_message()}
         return {"summary": "", "filename": str(path), "error": str(exc)}
 
 
@@ -261,6 +301,38 @@ def index_status() -> dict:
     """
     logger.info("index_status called")
     return _get_indexer().get_status()
+
+
+# ---------------------------------------------------------------------------
+# Tool 6 — llm_status
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def llm_status() -> dict:
+    """Check whether the LLM backend (LM Studio) is reachable and responding.
+
+    Sends a minimal test prompt to the configured LLM endpoint.
+    Use this to diagnose connection problems before calling ask_question.
+
+    Returns:
+        Dict with keys:
+            - ok (bool): True if the LLM responded successfully.
+            - model (str): Configured model name.
+            - base_url (str): Configured LLM endpoint.
+            - error (str | None): Error message if the LLM is unreachable.
+    """
+    logger.info("llm_status called")
+    try:
+        llm = _get_llm()
+        resp = llm.invoke("Reply with the single word: OK")
+        return {"ok": True, "model": cfg.LLM_MODEL, "base_url": cfg.LLM_BASE_URL, "error": None}
+    except Exception as exc:
+        if _is_connection_error(exc):
+            msg = _llm_connection_error_message()
+        else:
+            msg = str(exc)
+        logger.warning("llm_status: LLM unreachable: %s", msg)
+        return {"ok": False, "model": cfg.LLM_MODEL, "base_url": cfg.LLM_BASE_URL, "error": msg}
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +362,27 @@ def main() -> None:
         "Starting MCP RAG server (model: %s, transport: %s)",
         cfg.LLM_MODEL, transport,
     )
+
+    # Auto-index sample docs on startup if the collection is empty.
+    # Controlled by AUTO_INDEX_PATH env var (set in docker-compose.yml).
+    if cfg.AUTO_INDEX_PATH:
+        from pathlib import Path as _Path
+        _auto_path = _Path(cfg.AUTO_INDEX_PATH)
+        if _auto_path.exists():
+            if _get_indexer().get_status()["total_chunks"] == 0:
+                logger.info("Auto-indexing '%s' (collection is empty) ...", _auto_path)
+                _result = _get_indexer().index_folder(str(_auto_path))
+                logger.info(
+                    "Auto-index complete: %d files, %d chunks, %d errors",
+                    _result["files_indexed"], _result["chunks_added"], len(_result["errors"]),
+                )
+            else:
+                logger.info(
+                    "Auto-index skipped: collection already has %d chunks.",
+                    _get_indexer().get_status()["total_chunks"],
+                )
+        else:
+            logger.warning("AUTO_INDEX_PATH '%s' does not exist — skipping auto-index.", _auto_path)
 
     if transport == "stdio":
         mcp.run(transport="stdio")

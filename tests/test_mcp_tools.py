@@ -9,12 +9,15 @@ Tests cover:
     - index_folder propagates errors gracefully
     - ask_question returns required output keys
     - ask_question returns a helpful message when index is empty
+    - ask_question returns a connection-error message on LLM connectivity failure
     - find_relevant_docs returns a list with expected chunk keys
     - find_relevant_docs with top_k respects the limit
     - summarize_document returns a non-empty string
     - summarize_document returns an error dict for missing file
     - index_status returns a dict containing total_chunks
     - index_status collection_name equals configured COLLECTION_NAME
+    - llm_status returns ok=True when LLM responds
+    - llm_status returns ok=False with error message on connection failure
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import logging
 import pytest
 
 import src.server as server_module
@@ -188,3 +192,69 @@ class TestIndexStatusTool:
             result = srv.index_status()
 
         assert result["collection_name"] == COLLECTION_NAME
+
+
+# ---------------------------------------------------------------------------
+# llm_status
+# ---------------------------------------------------------------------------
+
+class TestLlmStatusTool:
+
+    def test_returns_ok_true_when_llm_responds(self, caplog):
+        """LM Studio is running and the model is loaded — llm_status must return ok=True."""
+        from langchain_core.messages import AIMessage
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = AIMessage(content="OK")
+
+        with caplog.at_level(logging.INFO, logger="__main__"):
+            with patch.object(server_module, "_get_llm", return_value=mock_llm):
+                result = srv.llm_status()
+
+        assert result["ok"] is True
+        assert result["error"] is None
+        assert "model" in result
+        assert "base_url" in result
+
+    def test_returns_ok_false_on_connection_error(self, caplog):
+        """LM Studio is NOT running — llm_status must return ok=False with a
+        human-readable error that tells the user to start LM Studio."""
+        import httpx
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = httpx.ConnectError("Connection refused")
+
+        with caplog.at_level(logging.WARNING, logger="__main__"):
+            with patch.object(server_module, "_get_llm", return_value=mock_llm):
+                result = srv.llm_status()
+
+        # Confirm the warning was logged
+        assert any("LLM unreachable" in r.message or "unreachable" in r.message.lower()
+                   for r in caplog.records), (
+            "Expected a warning log indicating LM Studio is unreachable"
+        )
+        assert result["ok"] is False
+        assert result["error"]
+        assert "LM Studio" in result["error"], (
+            "Error message should instruct the user to start LM Studio, "
+            f"got: {result['error']!r}"
+        )
+
+    def test_ask_question_returns_connection_message_on_llm_error(self, mock_indexer, caplog):
+        """When LM Studio is NOT running, ask_question must return a clear message
+        instead of the raw 'Connection error.' exception text."""
+        import httpx
+        with caplog.at_level(logging.ERROR, logger="__main__"):
+            with (
+                patch.object(server_module, "_get_indexer", return_value=mock_indexer),
+                patch("src.server.run_graph", side_effect=httpx.ConnectError("refused")),
+            ):
+                result = srv.ask_question("What is Bilbo's name?")
+
+        # Confirm the error was logged
+        assert any("Error in ask_question" in r.message for r in caplog.records), (
+            "Expected an error log for the ask_question connection failure"
+        )
+        assert result["is_grounded"] is False
+        assert "LM Studio" in result["answer"], (
+            "Answer should instruct the user to start LM Studio, "
+            f"got: {result['answer']!r}"
+        )
